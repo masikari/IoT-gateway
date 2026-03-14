@@ -216,7 +216,7 @@ class IoTGatewayHandler(http.server.BaseHTTPRequestHandler):
                         backend_url,
                         headers=headers,
                         timeout=30,
-                        allow_redirects=False  # Don't follow redirects
+                        allow_redirects=True  # Don't follow redirects
                     )
                 else:  # POST
                     response = session.post(
@@ -224,7 +224,7 @@ class IoTGatewayHandler(http.server.BaseHTTPRequestHandler):
                         data=body,
                         headers=headers,
                         timeout=30,
-                        allow_redirects=False
+                        allow_redirects=True
                     )
                 
                 # Calculate processing time
