@@ -2,11 +2,7 @@
 """
 IoT Gateway for SIM900A GSM Module
 Accepts HTTP requests from ESP32+SIM900A, forwards HTTPS to backend
-
-This gateway solves the problem where SIM900A cannot handle HTTPS.
-It acts as a simple HTTP-to-HTTPS proxy.
-
-Deploy this as a separate service on Render.com
+Version: 2.0.0 - With debug endpoint and redirect handling
 """
 
 import http.server
@@ -17,6 +13,7 @@ import os
 import sys
 import json
 import time
+import socket
 from urllib.parse import urlparse
 from datetime import datetime
 
@@ -50,7 +47,7 @@ logger = logging.getLogger(GATEWAY_NAME)
 
 # Log startup configuration
 logger.info("=" * 60)
-logger.info(f"🚀 Starting IoT Gateway v1.0.0")
+logger.info(f"🚀 Starting IoT Gateway v2.0.0")
 logger.info(f"📡 Listening on port: {PORT}")
 logger.info(f"🔄 Forwarding to backend: {BACKEND_URL}")
 logger.info(f"🔍 Debug mode: {DEBUG}")
@@ -72,8 +69,13 @@ class IoTGatewayHandler(http.server.BaseHTTPRequestHandler):
         logger.info(f"{self.client_address[0]} - {format % args}")
     
     def do_GET(self):
-        """Handle GET requests (heartbeats, status checks)"""
-        self.handle_request('GET')
+        """Handle GET requests with special debug endpoint"""
+        if self.path == '/debug':
+            self.handle_debug()
+        elif self.path == '/health':
+            self.handle_health()
+        else:
+            self.handle_request('GET')
     
     def do_POST(self):
         """Handle POST requests (payments, tamper alerts)"""
@@ -87,6 +89,81 @@ class IoTGatewayHandler(http.server.BaseHTTPRequestHandler):
         self.send_header('Access-Control-Allow-Headers', 'Content-Type')
         self.end_headers()
     
+    def handle_debug(self):
+        """Debug endpoint to check gateway configuration"""
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/plain')
+        self.end_headers()
+        
+        # Get local IP
+        hostname = socket.gethostname()
+        local_ip = socket.gethostbyname(hostname)
+        
+        # Build debug info
+        debug_info = []
+        debug_info.append("=" * 50)
+        debug_info.append("IoT GATEWAY DEBUG INFORMATION")
+        debug_info.append("=" * 50)
+        debug_info.append(f"Timestamp: {datetime.now().isoformat()}")
+        debug_info.append(f"Gateway Name: {GATEWAY_NAME}")
+        debug_info.append(f"Version: 2.0.0")
+        debug_info.append(f"Hostname: {hostname}")
+        debug_info.append(f"Local IP: {local_ip}")
+        debug_info.append(f"Listening Port: {PORT}")
+        debug_info.append(f"Backend URL: {BACKEND_URL}")
+        debug_info.append(f"Debug Mode: {DEBUG}")
+        debug_info.append("")
+        debug_info.append("CLIENT INFORMATION:")
+        debug_info.append(f"  Client IP: {self.client_address[0]}")
+        debug_info.append(f"  Client Port: {self.client_address[1]}")
+        debug_info.append("")
+        debug_info.append("REQUEST HEADERS RECEIVED:")
+        for key, value in self.headers.items():
+            debug_info.append(f"  {key}: {value}")
+        debug_info.append("")
+        debug_info.append("ENVIRONMENT VARIABLES:")
+        debug_info.append(f"  PORT: {PORT}")
+        debug_info.append(f"  BACKEND_URL: {BACKEND_URL}")
+        debug_info.append(f"  GATEWAY_NAME: {GATEWAY_NAME}")
+        debug_info.append(f"  DEBUG: {DEBUG}")
+        debug_info.append("")
+        debug_info.append("=" * 50)
+        debug_info.append("Gateway is ready to forward requests!")
+        debug_info.append("=" * 50)
+        
+        # Send response
+        self.wfile.write("\n".join(debug_info).encode())
+        logger.info(f"Debug info sent to {self.client_address[0]}")
+    
+    def handle_health(self):
+        """Health check endpoint for Render"""
+        try:
+            # Test backend connectivity
+            test_response = requests.get(f"{BACKEND_URL}/health", timeout=5)
+            backend_status = "healthy" if test_response.status_code == 200 else "unhealthy"
+            backend_code = test_response.status_code
+        except Exception as e:
+            backend_status = "unreachable"
+            backend_code = str(e)
+        
+        health_data = {
+            "status": "healthy",
+            "gateway": GATEWAY_NAME,
+            "version": "2.0.0",
+            "timestamp": datetime.now().isoformat(),
+            "uptime": time.time() - start_time if 'start_time' in globals() else 0,
+            "backend": {
+                "url": BACKEND_URL,
+                "status": backend_status,
+                "response": str(backend_code)
+            }
+        }
+        
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(json.dumps(health_data, indent=2).encode())
+    
     def handle_request(self, method):
         """Common request handler for all HTTP methods"""
         
@@ -99,18 +176,8 @@ class IoTGatewayHandler(http.server.BaseHTTPRequestHandler):
             content_length = int(self.headers.get('Content-Length', 0))
             body = self.rfile.read(content_length) if content_length > 0 else None
             
-            # Parse body for logging
-            body_str = ""
-            if body:
-                try:
-                    body_str = body.decode('utf-8', errors='ignore')
-                except:
-                    body_str = "[binary data]"
-            
             # Log incoming request
             logger.info(f"[{request_id}] → {method} {self.path} from {self.client_address[0]}")
-            if body and DEBUG:
-                logger.debug(f"[{request_id}]   Payload: {body_str[:200]}")
             
             # Construct backend URL
             backend_url = f"{BACKEND_URL}{self.path}"
@@ -123,23 +190,36 @@ class IoTGatewayHandler(http.server.BaseHTTPRequestHandler):
                 'X-Forwarded-Host': self.headers.get('Host', ''),
                 'X-Gateway-Id': GATEWAY_NAME,
                 'X-Request-Id': request_id,
-                'User-Agent': 'IoT-Gateway/1.0'
+                'User-Agent': 'IoT-Gateway/2.0'
             }
+            
+            # Add original host if present
+            if 'Host' in self.headers:
+                headers['X-Original-Host'] = self.headers['Host']
             
             if DEBUG:
                 logger.debug(f"[{request_id}]   Forwarding to: {backend_url}")
+                if body:
+                    try:
+                        body_str = body.decode('utf-8', errors='ignore')[:200]
+                        logger.debug(f"[{request_id}]   Payload: {body_str}")
+                    except:
+                        pass
             
             # Forward request to backend
             try:
+                # Use a session for connection reuse
+                session = requests.Session()
+                
                 if method == 'GET':
-                    response = requests.get(
+                    response = session.get(
                         backend_url,
                         headers=headers,
                         timeout=30,
-                        allow_redirects=False  # Don't follow redirects, let caller handle
+                        allow_redirects=False  # Don't follow redirects
                     )
                 else:  # POST
-                    response = requests.post(
+                    response = session.post(
                         backend_url,
                         data=body,
                         headers=headers,
@@ -153,6 +233,31 @@ class IoTGatewayHandler(http.server.BaseHTTPRequestHandler):
                 # Log backend response
                 logger.info(f"[{request_id}] ← Backend responded {response.status_code} in {elapsed_ms}ms")
                 
+                # If we get a redirect from backend, follow it manually
+                if response.status_code in [301, 302, 307, 308]:
+                    redirect_url = response.headers.get('Location')
+                    if redirect_url:
+                        logger.info(f"[{request_id}]   Following redirect to: {redirect_url}")
+                        
+                        # Make new request to redirect URL
+                        if method == 'GET':
+                            response = session.get(
+                                redirect_url,
+                                headers=headers,
+                                timeout=30,
+                                allow_redirects=True
+                            )
+                        else:
+                            response = session.post(
+                                redirect_url,
+                                data=body,
+                                headers=headers,
+                                timeout=30,
+                                allow_redirects=True
+                            )
+                        
+                        logger.info(f"[{request_id}]   After redirect: {response.status_code}")
+                
                 # Send response back to client
                 self.send_response(response.status_code)
                 
@@ -164,6 +269,7 @@ class IoTGatewayHandler(http.server.BaseHTTPRequestHandler):
                 # Add gateway info headers
                 self.send_header('X-Gateway', GATEWAY_NAME)
                 self.send_header('X-Request-Time', f'{elapsed_ms}ms')
+                self.send_header('X-Request-Id', request_id)
                 
                 self.end_headers()
                 
@@ -196,32 +302,8 @@ class IoTGatewayHandler(http.server.BaseHTTPRequestHandler):
         finally:
             # Log request completion
             total_ms = int((time.time() - start_time) * 1000)
-            logger.debug(f"[{request_id}] ✓ Request completed in {total_ms}ms")
-
-# ============================================
-# HEALTH CHECK ENDPOINT (for Render)
-# ============================================
-
-def health_check():
-    """Simple health check that Render can use"""
-    try:
-        # Test backend connectivity
-        test_response = requests.get(f"{BACKEND_URL}/health", timeout=5)
-        backend_status = "healthy" if test_response.status_code == 200 else "unhealthy"
-    except:
-        backend_status = "unreachable"
-    
-    return {
-        "status": "healthy",
-        "gateway": GATEWAY_NAME,
-        "version": "1.0.0",
-        "timestamp": datetime.now().isoformat(),
-        "backend": {
-            "url": BACKEND_URL,
-            "status": backend_status
-        },
-        "uptime": time.time() - start_time if 'start_time' in globals() else 0
-    }
+            if DEBUG:
+                logger.debug(f"[{request_id}] ✓ Request completed in {total_ms}ms")
 
 # ============================================
 # CUSTOM SERVER WITH HEALTH CHECK
@@ -242,6 +324,8 @@ def run_gateway():
         
         logger.info(f"✅ Gateway is ready and accepting connections")
         logger.info(f"🌍 Public URL: http://localhost:{PORT} (or your Render URL)")
+        logger.info(f"📝 Debug endpoint: http://localhost:{PORT}/debug")
+        logger.info(f"📝 Health endpoint: http://localhost:{PORT}/health")
         logger.info(f"📝 Test with: curl http://localhost:{PORT}/ping/test")
         logger.info("Press Ctrl+C to stop\n")
         
