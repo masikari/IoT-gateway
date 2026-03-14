@@ -1,0 +1,19 @@
+# render.yaml - Infrastructure as Code for IoT Gateway
+
+services:
+  - type: web
+    name: iot-gateway
+    runtime: python
+    region: oregon  # Choose same region as your backend
+    plan: free
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    startCommand: python gateway.py
+    healthCheckPath: /health
+    envVars:
+      - key: BACKEND_URL
+        value: https://pool-table-backend-jukw.onrender.com
+      - key: GATEWAY_NAME
+        value: iot-gateway
+      - key: DEBUG
+        value: false
